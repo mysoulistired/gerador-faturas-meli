@@ -15,9 +15,11 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, scrolledtext, ttk
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+from generate_faturas import run_generation
+
+BASE_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) \
+    else Path(__file__).resolve().parent.parent
 SCRIPT_DIR = Path(__file__).resolve().parent
-GENERATE_SCRIPT = SCRIPT_DIR / "generate_faturas.py"
 REQUIREMENTS = SCRIPT_DIR / "requirements.txt"
 
 DEFAULT_PREFATURA = BASE_DIR / "Planilhas Revisar" / "Pré-fatura_Meli_Agosto - Q1.xlsx"
@@ -95,6 +97,8 @@ class FaturasGUI:
 
         self.btn_install = ttk.Button(bar, text="Instalar dependências", command=self.on_install)
         self.btn_install.pack(side="left", padx=(0, 8))
+        if getattr(sys, "frozen", False):
+            self.btn_install.state(["disabled"])
 
         self.btn_generate = ttk.Button(bar, text="Gerar Faturas", command=self.on_generate)
         self.btn_generate.pack(side="left")
@@ -114,7 +118,7 @@ class FaturasGUI:
         if self.running:
             return
         cmd = [sys.executable, "-m", "pip", "install", "-r", str(REQUIREMENTS)]
-        self._run_in_background(cmd, "Instalando dependências")
+        self._run_subprocess(cmd, "Instalando dependências")
 
     def on_generate(self):
         if self.running:
@@ -125,7 +129,7 @@ class FaturasGUI:
         emissao = self.var_emissao.get().strip()
         periodo = self.var_periodo.get().strip()
         linehaul = self.var_linehaul.get().strip()
-        hub = self.var_hub.get().strip()
+        hub = self.var_hub.get().strip() or None
 
         faltando = [n for n, v in [("Pré-fatura", prefatura), ("Template", template),
                                     ("Pasta de saída", out_dir), ("Emissão", emissao),
@@ -134,40 +138,34 @@ class FaturasGUI:
             self._log(f"[!] Preencha os campos obrigatórios: {', '.join(faltando)}\n")
             return
         try:
-            datetime.date.fromisoformat(emissao)
+            emissao_date = datetime.date.fromisoformat(emissao)
         except ValueError:
             self._log("[!] Data de emissão inválida. Use o formato AAAA-MM-DD.\n")
             return
 
-        cmd = [
-            sys.executable, str(GENERATE_SCRIPT),
-            "--prefatura", prefatura,
-            "--template", template,
-            "--out-dir", out_dir,
-            "--emissao", emissao,
-            "--periodo", periodo,
-            "--linehaul", linehaul,
-        ]
-        if hub:
-            cmd += ["--hub", hub]
-
-        self._run_in_background(cmd, "Gerando faturas")
+        kwargs = dict(
+            prefatura=Path(prefatura), template=Path(template), out_dir=Path(out_dir),
+            emissao=emissao_date, periodo=periodo, linehaul=linehaul, hub=hub,
+        )
+        self._run_generation(kwargs)
 
     def on_clear_console(self):
         self.console.configure(state="normal")
         self.console.delete("1.0", tk.END)
         self.console.configure(state="disabled")
 
-    def _run_in_background(self, cmd: list[str], label: str):
+    def _start(self):
         self.running = True
         self.btn_install.state(["disabled"])
         self.btn_generate.state(["disabled"])
-        self._log(f"\n$ {' '.join(cmd)}\n")
 
-        thread = threading.Thread(target=self._worker, args=(cmd, label), daemon=True)
+    def _run_subprocess(self, cmd: list[str], label: str):
+        self._start()
+        self._log(f"\n$ {' '.join(cmd)}\n")
+        thread = threading.Thread(target=self._subprocess_worker, args=(cmd, label), daemon=True)
         thread.start()
 
-    def _worker(self, cmd: list[str], label: str):
+    def _subprocess_worker(self, cmd: list[str], label: str):
         try:
             proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -181,6 +179,19 @@ class FaturasGUI:
             self.log_queue.put(f"\n[{label}] {status}.\n")
         except Exception as exc:
             self.log_queue.put(f"\n[!] Falha ao executar: {exc}\n")
+        finally:
+            self.log_queue.put("__DONE__")
+
+    def _run_generation(self, kwargs: dict):
+        self._start()
+        thread = threading.Thread(target=self._generation_worker, args=(kwargs,), daemon=True)
+        thread.start()
+
+    def _generation_worker(self, kwargs: dict):
+        try:
+            run_generation(**kwargs, log=lambda line: self.log_queue.put(line + "\n"))
+        except Exception as exc:
+            self.log_queue.put(f"\n[!] Falha ao gerar faturas: {exc}\n")
         finally:
             self.log_queue.put("__DONE__")
 

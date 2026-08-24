@@ -181,7 +181,50 @@ def build_fatura(template_path: Path, out_path: Path, *, hub: str, cidade: str,
     wb.save(out_path)
 
 
+def run_generation(*, prefatura: Path, template: Path, out_dir: Path, emissao,
+                    periodo: str, linehaul: str, hub: str | None = None, log=print):
+    """Lógica compartilhada pela CLI e pela GUI. `log` recebe cada linha de
+    progresso (por padrão, print; a GUI passa sua própria função de log)."""
+    log(f"Carregando {prefatura} ...")
+    wb = openpyxl.load_workbook(prefatura, data_only=True)
+    hub_to_city, hub_to_routes = load_meli_maps(wb["1. MELI"])
+    groups = load_lancamento_groups(wb["4. Lançamento"])
+    ctes_by_city = load_ctes_by_city(wb["CT-es"])
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    hubs = [hub] if hub else sorted(groups.keys())
+    for h in hubs:
+        group = groups.get(h)
+        if not group:
+            log(f"  [!] hub {h}: nenhuma linha 'Fatura' encontrada na aba 4. Lançamento, pulando.")
+            continue
+        cidade = hub_to_city.get(h)
+        if not cidade:
+            log(f"  [!] hub {h}: cidade não encontrada na aba 1. MELI, pulando.")
+            continue
+        ctes = ctes_by_city.get(normalize_city(cidade), [])
+        if not ctes:
+            log(f"  [!] hub {h} ({cidade}): nenhum CT-e encontrado na aba CT-es para essa cidade.")
+        rotas = hub_to_routes.get(h, [])
+
+        out_path = out_dir / f"{cidade} - {h}.xlsx"
+        build_fatura(
+            template, out_path,
+            hub=h, cidade=cidade, emissao=emissao,
+            periodo=periodo, line_haul=linehaul,
+            group=group, ctes=ctes, rotas=rotas,
+        )
+        log(f"  OK  {out_path.name}  "
+            f"(subtotal={group['subtotal']:.2f} icms={group['icms']:.2f} total={group['total']:.2f} "
+            f"linhas={group['linhas']} ctes={len(ctes)})")
+
+    log("Concluído.")
+
+
 def main():
+    import datetime
+
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--prefatura", required=True, type=Path,
                      help="Caminho da Pré-fatura (.xlsx)")
@@ -199,44 +242,11 @@ def main():
                      help="Gerar só um hub específico (ex.: BRMG02). Default: todos.")
     args = ap.parse_args()
 
-    import datetime
-    emissao = datetime.date.fromisoformat(args.emissao)
-
-    print(f"Carregando {args.prefatura} ...")
-    wb = openpyxl.load_workbook(args.prefatura, data_only=True)
-    hub_to_city, hub_to_routes = load_meli_maps(wb["1. MELI"])
-    groups = load_lancamento_groups(wb["4. Lançamento"])
-    ctes_by_city = load_ctes_by_city(wb["CT-es"])
-
-    args.out_dir.mkdir(parents=True, exist_ok=True)
-
-    hubs = [args.hub] if args.hub else sorted(groups.keys())
-    for hub in hubs:
-        group = groups.get(hub)
-        if not group:
-            print(f"  [!] hub {hub}: nenhuma linha 'Fatura' encontrada na aba 4. Lançamento, pulando.")
-            continue
-        cidade = hub_to_city.get(hub)
-        if not cidade:
-            print(f"  [!] hub {hub}: cidade não encontrada na aba 1. MELI, pulando.")
-            continue
-        ctes = ctes_by_city.get(normalize_city(cidade), [])
-        if not ctes:
-            print(f"  [!] hub {hub} ({cidade}): nenhum CT-e encontrado na aba CT-es para essa cidade.")
-        rotas = hub_to_routes.get(hub, [])
-
-        out_path = args.out_dir / f"{cidade} - {hub}.xlsx"
-        build_fatura(
-            args.template, out_path,
-            hub=hub, cidade=cidade, emissao=emissao,
-            periodo=args.periodo, line_haul=args.linehaul,
-            group=group, ctes=ctes, rotas=rotas,
-        )
-        print(f"  OK  {out_path.name}  "
-              f"(subtotal={group['subtotal']:.2f} icms={group['icms']:.2f} total={group['total']:.2f} "
-              f"linhas={group['linhas']} ctes={len(ctes)})")
-
-    print("Concluído.")
+    run_generation(
+        prefatura=args.prefatura, template=args.template, out_dir=args.out_dir,
+        emissao=datetime.date.fromisoformat(args.emissao),
+        periodo=args.periodo, linehaul=args.linehaul, hub=args.hub,
+    )
 
 
 if __name__ == "__main__":

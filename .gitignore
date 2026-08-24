@@ -1,3 +1,6 @@
 Planilhas Revisar/
 scripts/__pycache__/
+scripts/build/
+scripts/dist/
+scripts/*.spec
 *.pyc
