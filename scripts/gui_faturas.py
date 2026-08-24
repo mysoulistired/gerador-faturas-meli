@@ -15,8 +15,6 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, scrolledtext, ttk
 
-from generate_faturas import run_generation
-
 BASE_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) \
     else Path(__file__).resolve().parent.parent
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -218,6 +216,14 @@ class FaturasGUI:
 
     def _generation_worker(self, kwargs: dict):
         try:
+            try:
+                from generate_faturas import run_generation
+            except ImportError as exc:
+                self.log_queue.put(
+                    f"\n[!] Faltam dependências para gerar as faturas ({exc}). "
+                    f"Clique em 'Instalar dependências' e tente de novo.\n"
+                )
+                return
             run_generation(**kwargs, log=lambda line: self.log_queue.put(line + "\n"))
         except Exception as exc:
             self.log_queue.put(f"\n[!] Falha ao gerar faturas: {exc}\n")

@@ -14,11 +14,21 @@ CT-es ganhou/perdeu uma coluna), o que quebraria índices fixos.
 from __future__ import annotations
 
 import argparse
+import re
 import unicodedata
 from pathlib import Path
 
 import openpyxl
 from num2words import num2words
+
+INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*]')
+
+
+def safe_filename(name: str) -> str:
+    """Remove caracteres que o Windows não aceita em nome de arquivo (ex.:
+    se a cidade tiver uma barra por erro de digitação, isso quebraria
+    wb.save() com um OSError difícil de entender)."""
+    return INVALID_FILENAME_CHARS.sub("-", name).strip()
 
 
 def normalize_city(name: str) -> str:
@@ -171,7 +181,9 @@ def build_fatura(template_path: Path, out_path: Path, *, hub: str, cidade: str,
 
     ws["C14"] = emissao  # B14 mantém a fórmula '=90+C14' do template
     numeros_fatura = sorted(str(n) for n in group["numeros"])
-    if len(numeros_fatura) != 1:
+    if not numeros_fatura:
+        print(f"  [!] hub {hub}: nenhum número de fatura preenchido na coluna X, campo ficará vazio.")
+    elif len(numeros_fatura) > 1:
         print(f"  [!] hub {hub}: número de fatura não é único na coluna X: {numeros_fatura!r}, "
               f"usando o primeiro.")
     ws["D14"] = numeros_fatura[0] if numeros_fatura else ""
@@ -198,19 +210,30 @@ def build_fatura(template_path: Path, out_path: Path, *, hub: str, cidade: str,
     wb.save(out_path)
 
 
+def load_sheet(wb, name: str):
+    try:
+        return wb[name]
+    except KeyError:
+        raise ValueError(
+            f"A planilha não tem uma aba chamada '{name}'. Abas encontradas: "
+            f"{wb.sheetnames!r}. O layout da Pré-fatura pode ter mudado."
+        ) from None
+
+
 def run_generation(*, prefatura: Path, template: Path, out_dir: Path, emissao,
                     periodo: str, linehaul: str, hub: str | None = None, log=print):
     """Lógica compartilhada pela CLI e pela GUI. `log` recebe cada linha de
     progresso (por padrão, print; a GUI passa sua própria função de log)."""
     log(f"Carregando {prefatura} ...")
     wb = openpyxl.load_workbook(prefatura, data_only=True)
-    hub_to_city, hub_to_routes = load_meli_maps(wb["1. MELI"])
-    groups = load_lancamento_groups(wb["4. Lançamento"])
-    ctes_by_city = load_ctes_by_city(wb["CT-es"])
+    hub_to_city, hub_to_routes = load_meli_maps(load_sheet(wb, "1. MELI"))
+    groups = load_lancamento_groups(load_sheet(wb, "4. Lançamento"))
+    ctes_by_city = load_ctes_by_city(load_sheet(wb, "CT-es"))
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
     hubs = [hub] if hub else sorted(groups.keys())
+    falhas = 0
     for h in hubs:
         group = groups.get(h)
         if not group:
@@ -225,18 +248,26 @@ def run_generation(*, prefatura: Path, template: Path, out_dir: Path, emissao,
             log(f"  [!] hub {h} ({cidade}): nenhum CT-e encontrado na aba CT-es para essa cidade.")
         rotas = hub_to_routes.get(h, [])
 
-        out_path = out_dir / f"{cidade} - {h}.xlsx"
-        build_fatura(
-            template, out_path,
-            hub=h, cidade=cidade, emissao=emissao,
-            periodo=periodo, line_haul=linehaul,
-            group=group, ctes=ctes, rotas=rotas,
-        )
+        out_path = out_dir / f"{safe_filename(cidade)} - {safe_filename(h)}.xlsx"
+        try:
+            build_fatura(
+                template, out_path,
+                hub=h, cidade=cidade, emissao=emissao,
+                periodo=periodo, line_haul=linehaul,
+                group=group, ctes=ctes, rotas=rotas,
+            )
+        except Exception as exc:
+            falhas += 1
+            log(f"  [ERRO] hub {h} ({cidade}): falha ao gerar a fatura, pulando. Detalhe: {exc}")
+            continue
         log(f"  OK  {out_path.name}  "
             f"(subtotal={group['subtotal']:.2f} icms={group['icms']:.2f} total={group['total']:.2f} "
             f"linhas={group['linhas']} ctes={len(ctes)})")
 
-    log("Concluído.")
+    if falhas:
+        log(f"Concluído com {falhas} hub(s) que falharam (veja os [ERRO] acima).")
+    else:
+        log("Concluído.")
 
 
 def main():
