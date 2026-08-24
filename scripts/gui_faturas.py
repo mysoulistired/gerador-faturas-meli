@@ -7,13 +7,18 @@ Roda com: python scripts/gui_faturas.py
 from __future__ import annotations
 
 import datetime
+import os
 import queue
 import subprocess
 import sys
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, scrolledtext, ttk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
+
+import updater
+
+__version__ = "1.0.0"
 
 BASE_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) \
     else Path(__file__).resolve().parent.parent
@@ -37,7 +42,7 @@ BORDER = "#3c3c3c"
 class FaturasGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Gerador de Faturas - Pré-fatura Mercado Livre")
+        self.root.title(f"Gerador de Faturas - Pré-fatura Mercado Livre (v{__version__})")
         self.root.geometry("860x640")
         self.root.configure(bg=BG)
 
@@ -50,6 +55,27 @@ class FaturasGUI:
         self._build_console()
 
         self.root.after(100, self._poll_log_queue)
+        threading.Thread(target=self._check_updates_worker, daemon=True).start()
+
+    def _check_updates_worker(self):
+        info = updater.check_for_update(__version__)
+        if info:
+            self.root.after(0, self._offer_update, info)
+
+    def _offer_update(self, info: dict):
+        quer = messagebox.askyesno(
+            "Atualização disponível",
+            f"Uma nova versão (v{info['version']}) está disponível. Atualizar agora?\n\n"
+            "O programa vai fechar e reabrir sozinho já atualizado.",
+        )
+        if quer:
+            self._log(f"\nBaixando atualização v{info['version']}...\n")
+            threading.Thread(target=self._apply_update_worker, args=(info,), daemon=True).start()
+
+    def _apply_update_worker(self, info: dict):
+        ok = updater.apply_update(info["download_url"], log=lambda line: self.log_queue.put(line + "\n"))
+        if ok:
+            self.log_queue.put("__RESTART__")
 
     def _apply_dark_theme(self):
         style = ttk.Style(self.root)
@@ -238,11 +264,18 @@ class FaturasGUI:
                     self.running = False
                     self.btn_install.state(["!disabled"])
                     self.btn_generate.state(["!disabled"])
+                elif line == "__RESTART__":
+                    self.root.after(500, self._restart_now)
+                    return
                 else:
                     self._log(line)
         except queue.Empty:
             pass
         self.root.after(100, self._poll_log_queue)
+
+    def _restart_now(self):
+        self.root.destroy()
+        os._exit(0)
 
     def _log(self, text: str):
         self.console.configure(state="normal")
