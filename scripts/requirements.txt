@@ -1,0 +1,2 @@
+openpyxl
+num2words
