@@ -3,19 +3,24 @@ Gera faturas (uma planilha .xlsx por hub) a partir da Pré-fatura, usando
 o layout de "BETIM - BRMG02.xlsx" como template.
 
 Regras de agregação e mapeamento entre abas foram validadas manualmente
-contra a fatura BETIM - BRMG02.xlsx (ver Relatorio_Analise_Pre-Fatura.md).
-Período e Line Haul não existem na Pré-fatura e precisam ser passados na
-linha de comando.
+contra faturas oficiais (ver Relatorio_Analise_Pre-Fatura.md). Período e
+Line Haul não existem na Pré-fatura e precisam ser passados na linha de
+comando.
 
 As colunas são localizadas pelo texto do cabeçalho, não por letra/posição
 fixa: o layout da Pré-fatura já mudou de um mês para o outro (ex.: a aba
 CT-es ganhou/perdeu uma coluna), o que quebraria índices fixos.
+
+Os CT-es de cada fatura são filtrados pelo CNPJ Tomador do hub (via a
+aba "CNPJ BASES"), não pelo nome da cidade: uma mesma cidade pode ter
+mais de um hub (ex.: SIMÕES FILHO = BRBA02 e BRXBA1), e filtrar só por
+cidade juntava os CT-es dos dois hubs. Isso foi confirmado batendo 100%
+com duas faturas oficiais (BETIM e SIMÕES FILHO/BRXBA1).
 """
 from __future__ import annotations
 
 import argparse
 import re
-import unicodedata
 from pathlib import Path
 
 import openpyxl
@@ -31,11 +36,10 @@ def safe_filename(name: str) -> str:
     return INVALID_FILENAME_CHARS.sub("-", name).strip()
 
 
-def normalize_city(name: str) -> str:
-    """Sem acento/maiúsculas: a aba '1. MELI' grafa cidades como 'SIMÕES FILHO'
-    e a 'CT-es' como 'SIMOES FILHO', então o casamento direto falha."""
-    n = unicodedata.normalize("NFKD", name.strip().upper())
-    return "".join(c for c in n if not unicodedata.combining(c))
+def normalize_cnpj(value) -> str:
+    """Alguns arquivos guardam o CNPJ como texto com um apóstrofo inicial
+    (marca de 'forçar texto' do Excel); remove isso para comparar."""
+    return str(value).strip().lstrip("'")
 
 
 def find_columns(ws, header_row: int, names: list[str]) -> dict[str, int]:
@@ -79,6 +83,15 @@ CLIENTE = {
 MELI_HEADER_ROW = 2
 LANC_HEADER_ROW = 6
 CTES_HEADER_ROW = 1
+
+
+def format_id(value) -> str:
+    """Alguns arquivos guardam o número da fatura (ou de CT-e) como float
+    (5396.0) em vez de inteiro; sem isso o texto final mostra '5396.0'
+    em vez de '5396'."""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
 
 
 def format_brl(value: float) -> str:
@@ -146,19 +159,32 @@ def load_lancamento_groups(ws):
     return groups
 
 
-def load_ctes_by_city(ws):
-    """Indexado pela cidade normalizada (sem acento) para não depender de
-    grafia idêntica entre a aba CT-es e a aba 1. MELI."""
-    cols = find_columns(ws, CTES_HEADER_ROW, ["Numero", "Cidade Origem"])
-    by_city: dict[str, list[int]] = {}
+def load_hub_to_cnpj(ws) -> dict[str, str]:
+    """Aba 'CNPJ BASES': sem cabeçalho, coluna A = CNPJ Tomador, coluna C =
+    código do hub. É o mapeamento oficial hub -> CNPJ (único por hub, ao
+    contrário do nome da cidade, que pode ter mais de um hub)."""
+    hub_to_cnpj: dict[str, str] = {}
+    for r in range(1, ws.max_row + 1):
+        hub = ws.cell(row=r, column=3).value
+        cnpj = ws.cell(row=r, column=1).value
+        if hub and cnpj:
+            hub_to_cnpj[str(hub).strip()] = normalize_cnpj(cnpj)
+    return hub_to_cnpj
+
+
+def load_ctes_by_cnpj(ws) -> dict[str, list[int]]:
+    """Indexado pelo CNPJ Tomador (ver load_hub_to_cnpj para o porquê de não
+    usar a cidade)."""
+    cols = find_columns(ws, CTES_HEADER_ROW, ["Numero", "CNPJ Tomador"])
+    by_cnpj: dict[str, list[int]] = {}
     for r in range(CTES_HEADER_ROW + 1, ws.max_row + 1):
-        cidade = ws.cell(row=r, column=cols["Cidade Origem"]).value
+        cnpj = ws.cell(row=r, column=cols["CNPJ Tomador"]).value
         numero = ws.cell(row=r, column=cols["Numero"]).value
-        if cidade and numero is not None:
-            by_city.setdefault(normalize_city(str(cidade)), []).append(numero)
-    for city in by_city:
-        by_city[city].sort()
-    return by_city
+        if cnpj and numero is not None:
+            by_cnpj.setdefault(normalize_cnpj(cnpj), []).append(numero)
+    for cnpj in by_cnpj:
+        by_cnpj[cnpj].sort()
+    return by_cnpj
 
 
 def build_fatura(template_path: Path, out_path: Path, *, hub: str, cidade: str,
@@ -180,7 +206,7 @@ def build_fatura(template_path: Path, out_path: Path, *, hub: str, cidade: str,
     ws["C11"] = CLIENTE["cnpj"]
 
     ws["C14"] = emissao  # B14 mantém a fórmula '=90+C14' do template
-    numeros_fatura = sorted(str(n) for n in group["numeros"])
+    numeros_fatura = sorted(format_id(n) for n in group["numeros"])
     if not numeros_fatura:
         print(f"  [!] hub {hub}: nenhum número de fatura preenchido na coluna X, campo ficará vazio.")
     elif len(numeros_fatura) > 1:
@@ -193,7 +219,7 @@ def build_fatura(template_path: Path, out_path: Path, *, hub: str, cidade: str,
     ws["B17"] = f"Transporte CTE - {periodo} - Line Haul N. {line_haul}"
     ws["B20"] = valor_por_extenso(total)
 
-    ctes_str = " / ".join(str(n) for n in ctes)
+    ctes_str = " / ".join(format_id(n) for n in ctes)
     rotas_str = "\n".join(f"{veic.upper()} - {rota}" for veic, rota in rotas)
     ws["B22"] = (
         "Pela sua PRESTAÇÃO DE SERVIÇO conforme Dacte(s) abaixo. Na falta de pagamento "
@@ -228,7 +254,8 @@ def run_generation(*, prefatura: Path, template: Path, out_dir: Path, emissao,
     wb = openpyxl.load_workbook(prefatura, data_only=True)
     hub_to_city, hub_to_routes = load_meli_maps(load_sheet(wb, "1. MELI"))
     groups = load_lancamento_groups(load_sheet(wb, "4. Lançamento"))
-    ctes_by_city = load_ctes_by_city(load_sheet(wb, "CT-es"))
+    hub_to_cnpj = load_hub_to_cnpj(load_sheet(wb, "CNPJ BASES"))
+    ctes_by_cnpj = load_ctes_by_cnpj(load_sheet(wb, "CT-es"))
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -243,9 +270,14 @@ def run_generation(*, prefatura: Path, template: Path, out_dir: Path, emissao,
         if not cidade:
             log(f"  [!] hub {h}: cidade não encontrada na aba 1. MELI, pulando.")
             continue
-        ctes = ctes_by_city.get(normalize_city(cidade), [])
-        if not ctes:
-            log(f"  [!] hub {h} ({cidade}): nenhum CT-e encontrado na aba CT-es para essa cidade.")
+        cnpj = hub_to_cnpj.get(h)
+        if not cnpj:
+            log(f"  [!] hub {h}: não encontrado na aba CNPJ BASES, não dá pra filtrar os CT-es com segurança.")
+            ctes = []
+        else:
+            ctes = ctes_by_cnpj.get(cnpj, [])
+            if not ctes:
+                log(f"  [!] hub {h} ({cidade}): nenhum CT-e encontrado na aba CT-es para o CNPJ {cnpj}.")
         rotas = hub_to_routes.get(h, [])
 
         out_path = out_dir / f"{safe_filename(cidade)} - {safe_filename(h)}.xlsx"
