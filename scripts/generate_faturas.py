@@ -6,6 +6,10 @@ Regras de agregação e mapeamento entre abas foram validadas manualmente
 contra a fatura BETIM - BRMG02.xlsx (ver Relatorio_Analise_Pre-Fatura.md).
 Período e Line Haul não existem na Pré-fatura e precisam ser passados na
 linha de comando.
+
+As colunas são localizadas pelo texto do cabeçalho, não por letra/posição
+fixa: o layout da Pré-fatura já mudou de um mês para o outro (ex.: a aba
+CT-es ganhou/perdeu uma coluna), o que quebraria índices fixos.
 """
 from __future__ import annotations
 
@@ -24,6 +28,28 @@ def normalize_city(name: str) -> str:
     return "".join(c for c in n if not unicodedata.combining(c))
 
 
+def find_columns(ws, header_row: int, names: list[str]) -> dict[str, int]:
+    """Localiza, na `header_row`, a 1a coluna cujo texto bate com cada nome
+    em `names`. Levanta erro claro se algum não for encontrado, em vez de
+    seguir em frente lendo a coluna errada silenciosamente."""
+    found: dict[str, int] = {}
+    for col in range(1, ws.max_column + 1):
+        value = ws.cell(row=header_row, column=col).value
+        if not isinstance(value, str):
+            continue
+        text = value.strip()
+        for name in names:
+            if name not in found and text == name:
+                found[name] = col
+    faltando = [n for n in names if n not in found]
+    if faltando:
+        raise ValueError(
+            f"Aba '{ws.title}': não encontrei a(s) coluna(s) {faltando!r} "
+            f"na linha {header_row}. O layout da planilha pode ter mudado."
+        )
+    return found
+
+
 PRESTADOR = {
     "razao_social": "MULTICOM LOG TRANSPORTES LTDA",
     "inscr_est": 150140233110,
@@ -40,28 +66,9 @@ CLIENTE = {
     "cnpj": "03.007.331/0001-41",
 }
 
-# Aba "4. Lançamento": bloco "FATURAMENTO MERCADO LIVRE" (K:O), não o bloco
-# "FATURAMENTO LÖSUNG" (Q:U), que dá um valor de ICMS levemente diferente.
-LANC_ORIGEM = 7
-LANC_FRETE = 11
-LANC_GRIS = 12
-LANC_ICMS = 13
-LANC_TOTAL = 15
-LANC_DOC = 23
-LANC_NUMERO = 24
-LANC_FIRST_ROW = 7
-LANC_LAST_ROW = 651
-
-MELI_VEICULO = 6
-MELI_ROTA = 7
-MELI_ORIGEM = 8
-MELI_CIDADE = 9
-MELI_FIRST_ROW = 3
-MELI_LAST_ROW = 647
-
-CTES_NUMERO = 3
-CTES_CIDADE_ORIGEM = 40
-CTES_FIRST_ROW = 2
+MELI_HEADER_ROW = 2
+LANC_HEADER_ROW = 6
+CTES_HEADER_ROW = 1
 
 
 def format_brl(value: float) -> str:
@@ -79,13 +86,14 @@ def valor_por_extenso(value: float) -> str:
 
 def load_meli_maps(ws):
     """Retorna (hub -> cidade, hub -> [(veiculo, nome_rota), ...] em ordem de 1a aparição)."""
+    cols = find_columns(ws, MELI_HEADER_ROW, ["Veículo", "Nome da rota", "Origem", "Cidade I"])
     hub_to_city: dict[str, str] = {}
     hub_to_routes: dict[str, dict[tuple, None]] = {}
-    for r in range(MELI_FIRST_ROW, MELI_LAST_ROW + 1):
-        hub = ws.cell(row=r, column=MELI_ORIGEM).value
-        cidade = ws.cell(row=r, column=MELI_CIDADE).value
-        veiculo = ws.cell(row=r, column=MELI_VEICULO).value
-        rota = ws.cell(row=r, column=MELI_ROTA).value
+    for r in range(MELI_HEADER_ROW + 1, ws.max_row + 1):
+        hub = ws.cell(row=r, column=cols["Origem"]).value
+        cidade = ws.cell(row=r, column=cols["Cidade I"]).value
+        veiculo = ws.cell(row=r, column=cols["Veículo"]).value
+        rota = ws.cell(row=r, column=cols["Nome da rota"]).value
         if not hub:
             continue
         hub = str(hub).strip()
@@ -97,20 +105,28 @@ def load_meli_maps(ws):
 
 
 def load_lancamento_groups(ws):
-    """Agrupa a aba 4. Lançamento por hub, só linhas Doc.=='Fatura'."""
+    """Agrupa a aba 4. Lançamento por hub, só linhas Doc.=='Fatura'.
+
+    'Frete Receita', 'GRIS', 'ICMS/ISS' e 'Total' aparecem duas vezes no
+    cabeçalho (bloco Mercado Livre e bloco Lösung); find_columns pega a
+    1a ocorrência de cada, que é o bloco Mercado Livre (ver Achado 4 do
+    Relatorio_Analise_Pre-Fatura.md sobre por que esse é o bloco certo).
+    """
+    cols = find_columns(ws, LANC_HEADER_ROW,
+                         ["Origem", "Frete Receita", "GRIS", "ICMS/ISS", "Total", "Doc.", "Número"])
     groups: dict[str, dict] = {}
-    for r in range(LANC_FIRST_ROW, LANC_LAST_ROW + 1):
-        hub = ws.cell(row=r, column=LANC_ORIGEM).value
-        doc = ws.cell(row=r, column=LANC_DOC).value
+    for r in range(LANC_HEADER_ROW + 1, ws.max_row + 1):
+        hub = ws.cell(row=r, column=cols["Origem"]).value
+        doc = ws.cell(row=r, column=cols["Doc."]).value
         if not hub or doc != "Fatura":
             continue
         hub = str(hub).strip()
         g = groups.setdefault(hub, {"subtotal": 0.0, "icms": 0.0, "total": 0.0, "numeros": set(), "linhas": 0})
-        frete = ws.cell(row=r, column=LANC_FRETE).value or 0
-        gris = ws.cell(row=r, column=LANC_GRIS).value or 0
-        icms = ws.cell(row=r, column=LANC_ICMS).value or 0
-        total = ws.cell(row=r, column=LANC_TOTAL).value or 0
-        numero = ws.cell(row=r, column=LANC_NUMERO).value
+        frete = ws.cell(row=r, column=cols["Frete Receita"]).value or 0
+        gris = ws.cell(row=r, column=cols["GRIS"]).value or 0
+        icms = ws.cell(row=r, column=cols["ICMS/ISS"]).value or 0
+        total = ws.cell(row=r, column=cols["Total"]).value or 0
+        numero = ws.cell(row=r, column=cols["Número"]).value
         g["subtotal"] += frete + gris
         g["icms"] += icms
         g["total"] += total
@@ -123,10 +139,11 @@ def load_lancamento_groups(ws):
 def load_ctes_by_city(ws):
     """Indexado pela cidade normalizada (sem acento) para não depender de
     grafia idêntica entre a aba CT-es e a aba 1. MELI."""
+    cols = find_columns(ws, CTES_HEADER_ROW, ["Numero", "Cidade Origem"])
     by_city: dict[str, list[int]] = {}
-    for r in range(CTES_FIRST_ROW, ws.max_row + 1):
-        cidade = ws.cell(row=r, column=CTES_CIDADE_ORIGEM).value
-        numero = ws.cell(row=r, column=CTES_NUMERO).value
+    for r in range(CTES_HEADER_ROW + 1, ws.max_row + 1):
+        cidade = ws.cell(row=r, column=cols["Cidade Origem"]).value
+        numero = ws.cell(row=r, column=cols["Numero"]).value
         if cidade and numero is not None:
             by_city.setdefault(normalize_city(str(cidade)), []).append(numero)
     for city in by_city:
