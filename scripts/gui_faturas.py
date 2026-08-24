@@ -26,21 +26,50 @@ DEFAULT_PREFATURA = BASE_DIR / "Planilhas Revisar" / "Pré-fatura_Meli_Agosto - 
 DEFAULT_TEMPLATE = BASE_DIR / "Planilhas Revisar" / "BETIM - BRMG02.xlsx"
 DEFAULT_OUT_DIR = BASE_DIR / "Planilhas Revisar" / "Faturas Geradas"
 
+BG = "#1e1e1e"
+BG_PANEL = "#252526"
+FG = "#d4d4d4"
+FG_MUTED = "#9d9d9d"
+ENTRY_BG = "#3c3c3c"
+ACCENT = "#0e639c"
+ACCENT_ACTIVE = "#1177bb"
+BORDER = "#3c3c3c"
+
 
 class FaturasGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Gerador de Faturas - Pré-fatura Mercado Livre")
         self.root.geometry("860x640")
+        self.root.configure(bg=BG)
 
         self.log_queue: queue.Queue[str] = queue.Queue()
         self.running = False
 
+        self._apply_dark_theme()
         self._build_form()
         self._build_buttons()
         self._build_console()
 
         self.root.after(100, self._poll_log_queue)
+
+    def _apply_dark_theme(self):
+        style = ttk.Style(self.root)
+        style.theme_use("clam")
+
+        style.configure(".", background=BG, foreground=FG, fieldbackground=ENTRY_BG,
+                         bordercolor=BORDER, lightcolor=BG, darkcolor=BG)
+        style.configure("TFrame", background=BG)
+        style.configure("TLabelframe", background=BG, foreground=FG, bordercolor=BORDER)
+        style.configure("TLabelframe.Label", background=BG, foreground=FG)
+        style.configure("TLabel", background=BG, foreground=FG)
+        style.configure("TEntry", fieldbackground=ENTRY_BG, foreground=FG,
+                         insertcolor=FG, bordercolor=BORDER)
+        style.configure("TButton", background=ENTRY_BG, foreground=FG, bordercolor=BORDER,
+                         focuscolor=BG, padding=6)
+        style.map("TButton",
+                  background=[("active", ACCENT_ACTIVE), ("disabled", BG_PANEL)],
+                  foreground=[("disabled", FG_MUTED)])
 
     def _build_form(self):
         form = ttk.LabelFrame(self.root, text="Parâmetros")
