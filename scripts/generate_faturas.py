@@ -20,6 +20,7 @@ com duas faturas oficiais (BETIM e SIMÕES FILHO/BRXBA1).
 from __future__ import annotations
 
 import argparse
+import datetime
 import re
 from pathlib import Path
 
@@ -205,7 +206,8 @@ def build_fatura(template_path: Path, out_path: Path, *, hub: str, cidade: str,
     ws["C10"] = CLIENTE["municipio"]
     ws["C11"] = CLIENTE["cnpj"]
 
-    ws["C14"] = emissao  # B14 mantém a fórmula '=90+C14' do template
+    ws["C14"] = emissao
+    ws["B14"] = emissao + datetime.timedelta(days=90)
     numeros_fatura = sorted(format_id(n) for n in group["numeros"])
     if not numeros_fatura:
         print(f"  [!] hub {hub}: nenhum número de fatura preenchido na coluna X, campo ficará vazio.")
